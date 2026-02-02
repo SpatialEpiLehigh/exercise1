@@ -1,0 +1,1169 @@
+---
+title: "Exercise 1: Geocoding Exercise: Philadelphia Homicides 2025"
+author: "Eric Delmelle"
+date: "Spring 2026"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    code_folding: show
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = FALSE)
+```
+
+# Introduction
+
+## Learning Objectives
+
+By the end of this exercise, you will be able to:
+
+1. Geocode a set of addresses using the Census Bureau geocoder
+2. Calculate and interpret geocoding match rates
+3. Identify and analyse failed geocodes
+4. Create interactive maps to visualise spatial and temporal patterns
+5. Understand how geocoding quality affects downstream spatial analysis
+6. Apply the full geocoding-to-visualisation workflow independently on a new dataset of your choosing
+
+## Background
+
+This exercise uses criminal homicides that occurred in Philadelphia during 2025. The dataset includes incident details and address information, but **coordinates have been removed**. You must geocode these addresses and analyze the spatial and temporal patterns.
+
+---
+
+# Setup
+```{r load-packages}
+library(tidyverse)
+library(tidygeocoder)
+library(sf)
+library(leaflet)
+library(htmlwidgets)
+library(lubridate)
+library(knitr)
+
+# Set theme for plots
+theme_set(theme_minimal(base_size = 12))
+```
+
+---
+
+# Part 1: Data Exploration
+
+## Task 1.1: Load the Data
+```{r load-data}
+# Load the homicide dataset and parse the date column once
+homicides <- read_csv("philadelphia_homicides_2025.csv", show_col_types = FALSE) %>%
+  mutate(dispatch_date = mdy(dispatch_date))
+
+# Examine the structure
+glimpse(homicides)
+
+# Display first 10 rows
+kable(head(homicides, 10), caption = "First 10 homicide incidents")
+```
+
+**Question:** How many homicide incidents are in the dataset?
+
+**ANSWER:** There are **`r nrow(homicides)`** homicide incidents in the 2025 Philadelphia dataset.
+
+## Explore the dataset
+
+### Temporal Patterns: By Hour of Day
+
+
+```{r hourly-viz, fig.width=10, fig.height=6}
+# Count incidents by hour (0-23 format)
+hourly_counts <- homicides %>%
+  count(hour, name = "homicides") %>%
+  arrange(hour)
+
+# Create bar plot
+ggplot(hourly_counts, aes(x = hour, y = homicides)) +
+  geom_col(fill = "steelblue", alpha = 0.7) +
+  geom_text(aes(label = homicides), vjust = -0.5, size = 2.5) +
+  scale_x_continuous(breaks = seq(0, 23, 2)) +
+  labs(
+    title = "Philadelphia Homicides by Hour of Day (2025)",
+    subtitle = paste("Total homicides:", sum(hourly_counts$homicides)),
+    x = "Hour (0 = midnight, 23 = 11pm)",
+    y = "Number of Homicides"
+  ) +
+  theme_minimal(base_size = 12) +
+  ylim(0, max(hourly_counts$homicides) * 1.15)
+
+# Group into time periods for summary
+hourly_summary <- hourly_counts %>%
+  mutate(
+    time_period = case_when(
+      hour >= 0 & hour < 6 ~ "Late Night (12am-6am)",
+      hour >= 6 & hour < 12 ~ "Morning (6am-12pm)",
+      hour >= 12 & hour < 18 ~ "Afternoon (12pm-6pm)",
+      hour >= 18 & hour < 24 ~ "Evening (6pm-12am)"
+    )
+  ) %>%
+  group_by(time_period) %>%
+  summarize(homicides = sum(homicides)) %>%
+  mutate(percentage = round(homicides / sum(homicides) * 100, 1))
+
+kable(hourly_summary,
+      caption = "Homicides by Time Period",
+      col.names = c("Time Period", "Homicides", "Percentage"))
+```
+
+
+
+---
+
+# Part 2: Geocoding
+
+Before you geocode the homicide dataset, work through the short example below.
+It uses two well-known addresses so you can check the output against a map and
+get comfortable with how `geocode()` works.
+
+## Warm-Up: Geocoding Two Addresses
+
+### Single-line input
+
+The simplest way to call `geocode()` is to pass every address as one string
+(street + city + state).
+
+```{r example-single-line}
+library(tibble)
+library(tidygeocoder)
+
+# Two well-known addresses as single strings
+address_single <- tibble(
+  singlelineaddress = c(
+    "11 Wall St, New York, NY",
+    "600 Peachtree Street NE, Atlanta, GA"
+  )
+)
+
+# Geocode using the Census Bureau
+census_single <- address_single %>%
+  geocode(address = singlelineaddress, method = "census", verbose = TRUE)
+
+# Inspect the result
+census_single
+```
+
+
+---
+
+## Task 2.1: Geocode with Census Bureau
+```{r geocode-census}
+# Geocode using Census Bureau
+# NOTE: Census geocoder is slow and rate-limited
+
+homicides_census <- homicides %>%
+  mutate(
+    full_address = paste(location_block, "Philadelphia, PA")
+  ) %>%
+  geocode(
+    address = full_address,
+    method = "census",
+    lat = latitude,
+    long = longitude,
+    verbose = TRUE
+  )
+
+# Check what was added
+cat("Columns added by geocoding:\n")
+new_cols <- setdiff(colnames(homicides_census), colnames(homicides))
+cat(paste(new_cols, collapse = ", "), "\n")
+
+# Quick success rate check
+cat(
+  "\nGeocoding success rate:",
+  mean(!is.na(homicides_census$latitude)) * 100,
+  "%\n"
+)
+```
+
+**Question:** What columns were added by the geocoding process?
+
+**ANSWER:** The `geocode()` function adds two columns: **`latitude`** and **`longitude`**, named by the `lat =` and `long =` arguments in the call above.
+
+---
+
+## Task 2.2: Calculate Match Rate
+```{r match-rate-census}
+# Calculate match rate
+match_rate_census <- mean(!is.na(homicides_census$latitude)) * 100
+geocoded_count <- sum(!is.na(homicides_census$latitude))
+failed_count <- sum(is.na(homicides_census$latitude))
+
+# Summary statistics
+cat("=== CENSUS GEOCODER RESULTS ===\n")
+cat("Total addresses:", nrow(homicides_census), "\n")
+cat("Successfully geocoded:", geocoded_count, "\n")
+cat("Failed to geocode:", failed_count, "\n")
+cat("Match rate:", round(match_rate_census, 1), "%\n\n")
+```
+
+**Question:** What is your geocoding match rate with the Census Bureau geocoder?
+
+**ANSWER:** The match rate is **`r round(match_rate_census, 1)`%**. 
+
+**NOTE:** A typical match rate for US addresses ranges from 85-98%. Block-level addresses (like "2800 BLOCK PROSPECT ST") may have lower match rates than exact addresses because:
+- The geocoder must interpolate along the street segment
+- Some street segments may be missing from TIGER files
+- Block-level addresses are inherently less precise
+
+---
+
+## Task 2.3: Examine Failed Geocodes
+```{r failed-geocodes-census}
+failed_census <- homicides_census %>%
+  filter(is.na(latitude)) %>%
+  select(objectid, dispatch_date, location_block, dc_key)
+
+kable(
+  head(failed_census, 10),
+  caption = "Failed Geocodes (first 10)",
+  col.names = c("Object ID", "Date", "Address", "DC Key")
+)
+
+write_csv(failed_census, "failed_geocodes_census.csv")
+cat("\nSaved", nrow(failed_census), "failed addresses to: failed_geocodes_census.csv\n")
+
+```
+
+**Question:** List 3-5 examples of addresses that failed to geocode. What patterns do you notice?
+
+**ANSWER:** Examples of failed addresses:
+```{r show-failed-examples}
+if(nrow(failed_census) > 0) {
+  failed_census %>% 
+    head(5) %>% 
+    pull(location_block) %>%
+    cat(sep = "\n")
+} else {
+  cat("All addresses geocoded successfully!")
+}
+```
+
+**NOTE:** Common patterns in failed geocodes include:
+- Incomplete street names (e.g., "N" instead of "NORTH")
+- Non-standard abbreviations (e.g., "BLVD" vs "BOULEVARD")
+- Missing street segments in the TIGER reference database
+- Intersections rather than specific addresses (e.g., "15TH ST & WALNUT ST")
+- Misspellings or unusual street names
+
+---
+
+# Part 3: Spatial Analysis and Visualization
+
+## Task 3.1: Create Spatial Objects
+```{r create-sf}
+# Use Census geocoding results; drop cases that failed
+homicides_sf <- homicides_census %>%
+  filter(!is.na(latitude) & !is.na(longitude)) %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326)  # WGS84
+
+cat("Successfully created spatial object with", nrow(homicides_sf), "homicides\n")
+```
+
+**Question:** How many homicides were successfully geocoded and included in your spatial object?
+
+**ANSWER:** **`r nrow(homicides_sf)`** homicides were successfully geocoded and converted to a spatial object.
+
+**NOTE:** This represents `r round(nrow(homicides_sf)/nrow(homicides)*100, 1)`% of the original `r nrow(homicides)` homicides. The missing `r nrow(homicides) - nrow(homicides_sf)` cases (`r round((nrow(homicides) - nrow(homicides_sf))/nrow(homicides)*100, 1)`%) could not be mapped due to geocoding failure. If these failures are spatially clustered, our analysis will be biased.
+
+---
+
+## Task 3.2: Static Map
+```{r static-map, fig.width=10, fig.height=8}
+# Set up plot parameters
+par(mar = c(4, 4, 3, 1))
+
+# Get bounding box
+bbox <- st_bbox(homicides_sf)
+
+# Create plot
+plot(st_geometry(homicides_sf),
+     pch = 19,
+     col = alpha("red", 0.6),
+     cex = 0.8,
+     main = "Philadelphia Homicides 2025",
+     xlab = "Longitude",
+     ylab = "Latitude",
+     axes = TRUE)
+
+# Add grid
+grid()
+
+# Add count
+text(bbox["xmin"], bbox["ymax"], 
+     paste("n =", nrow(homicides_sf)), 
+     pos = 4, cex = 0.9)
+```
+
+**Question:** Based on the static map, do homicides appear to be randomly distributed across Philadelphia or are there apparent clusters?
+
+**ANSWER:** Homicides appear to be **spatially clustered** rather than randomly distributed. Visual inspection suggests:
+- Higher concentration in certain areas of the city
+- Some areas with very few or no homicides
+- Possible clustering in what appears to be central/north Philadelphia
+
+**NOTE:** This visual assessment should be confirmed with formal statistical tests (e.g., Moran\'s I, Ripley\'s K-function, or spatial scan statistics). The apparent clustering could reflect:
+1. True spatial clustering of homicide risk factors
+2. Population density patterns (more people = more potential victims)
+3. Spatially varying socioeconomic conditions
+4. Geographic variation in policing and reporting
+
+---
+
+## Task 3.3: Interactive Map - Basic
+```{r leaflet-basic, fig.width=10, fig.height=8}
+# Create basic interactive map
+map_basic <- homicides_sf %>%
+  leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircleMarkers(
+    popup = ~paste0(
+      "<strong>Homicide</strong><br>",
+      "Date: ", dispatch_date, "<br>",
+      "Time: ", hour, ":00<br>",
+      "Location: ", location_block, "<br>",
+      "District: ", dc_dist, "<br>",
+      "Object ID: ", objectid
+    ),
+    radius = 6,
+    color = "darkred",
+    fillColor = "red",
+    fillOpacity = 0.7,
+    weight = 2,
+    label = ~paste("District", dc_dist)
+  ) %>%
+  addScaleBar(position = "bottomleft") %>%
+  addMiniMap(
+    toggleDisplay = TRUE,
+    minimized = TRUE,
+    position = "bottomright"
+  ) %>%
+  addControl(
+    html = paste0("<div style=\'background: white; padding: 5px; border-radius: 5px;\'><strong>Philadelphia Homicides 2025</strong><br>n = ", nrow(homicides_sf), "</div>"),
+    position = "topright"
+  )
+
+# Display the map
+map_basic
+
+# Save the map
+saveWidget(map_basic, "philadelphia_homicides_basic.html", selfcontained = TRUE)
+cat("\nMap saved to: philadelphia_homicides_basic.html\n")
+```
+
+**Question:** Explore the interactive map. Which areas of Philadelphia have the highest concentration of homicides?
+
+**ANSWER:** Based on interactive exploration, the highest concentrations appear in:
+- **North Philadelphia** (Districts 22, 24, 25, 35)
+- **West Philadelphia** (Districts 16, 18, 19)
+- Some concentration in **Southwest Philadelphia** (District 12)
+
+**NOTE:** Students should zoom in and click on individual points to see patterns. Encourage them to:
+- Look for clustering within districts
+- Note areas with very few homicides (likely wealthy/suburban areas)
+- Consider how population density might explain patterns
+- Think about historical patterns of segregation and disinvestment
+
+---
+
+## Task 3.4: Enhanced Map - Time of Day
+```{r leaflet-time, fig.width=10, fig.height=8}
+# Categorize by time of day
+homicides_sf <- homicides_sf %>%
+  mutate(
+    time_period = case_when(
+      hour >= 0 & hour < 6 ~ "Late Night (12am-6am)",
+      hour >= 6 & hour < 12 ~ "Morning (6am-12pm)",
+      hour >= 12 & hour < 18 ~ "Afternoon (12pm-6pm)",
+      hour >= 18 & hour < 24 ~ "Evening (6pm-12am)"
+    ),
+    time_period = factor(time_period, levels = c(
+      "Morning (6am-12pm)",
+      "Afternoon (12pm-6pm)",
+      "Evening (6pm-12am)",
+      "Late Night (12am-6am)"
+    ))
+  )
+
+# Create color palette
+time_colors <- colorFactor(
+  palette = c("#FFC107", "#FF9800", "#F44336", "#880E4F"),
+  domain = homicides_sf$time_period
+)
+
+# Create map with time periods
+map_time <- homicides_sf %>%
+  leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircleMarkers(
+    popup = ~paste0(
+      "<strong>Homicide</strong><br>",
+      "Date: ", dispatch_date, "<br>",
+      "Time: ", hour, ":00 (", time_period, ")<br>",
+      "Location: ", location_block, "<br>",
+      "District: ", dc_dist
+    ),
+    radius = 6,
+    color = ~time_colors(time_period),
+    fillColor = ~time_colors(time_period),
+    fillOpacity = 0.8,
+    weight = 2,
+    group = ~time_period
+  ) %>%
+  addLayersControl(
+    overlayGroups = levels(homicides_sf$time_period),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  addLegend(
+    position = "topright",
+    pal = time_colors,
+    values = ~time_period,
+    title = "Time of Day",
+    opacity = 1
+  ) %>%
+  addScaleBar(position = "bottomleft")
+
+# Display map
+map_time
+
+# Save
+saveWidget(map_time, "philadelphia_homicides_timeofday.html", selfcontained = TRUE)
+cat("\nMap saved to: philadelphia_homicides_timeofday.html\n")
+```
+
+**Question:** Toggle the different time periods on/off. Do spatial patterns vary by time of day?
+
+**ANSWER:** Yes, spatial patterns show temporal variation:
+- **Late night homicides** (12am-6am) are the most common and appear concentrated in specific areas
+- **Morning homicides** (6am-12pm) are least common and more dispersed
+- **Evening homicides** (6pm-12am) show moderate clustering
+- Some districts show more variation by time than others
+
+**NOTE:** This spatiotemporal pattern suggests:
+1. Different causal mechanisms may be at work at different times
+2. Nighttime economy (bars, clubs) may concentrate risk
+3. Targeted interventions could be time-specific
+4. Resource allocation (police patrols) should consider temporal patterns
+
+---
+
+## Task 3.5: Map by Police District
+```{r leaflet-districts, fig.width=10, fig.height=8}
+# Count homicides by district
+district_summary <- homicides_sf %>%
+  st_drop_geometry() %>%
+  count(dc_dist, name = "homicides") %>%
+  arrange(desc(homicides))
+
+kable(district_summary,
+      caption = "Homicides by Police District (Geocoded Cases Only)",
+      col.names = c("District", "Homicides"))
+
+# Create district-colored map
+district_colors <- colorFactor(
+  palette = "Set3",
+  domain = homicides_sf$dc_dist
+)
+
+map_districts <- homicides_sf %>%
+  leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircleMarkers(
+    popup = ~paste0(
+      "<strong>District ", dc_dist, "</strong><br>",
+      "Date: ", dispatch_date, "<br>",
+      "Time: ", hour, ":00<br>",
+      "Location: ", location_block
+    ),
+    radius = 6,
+    color = ~district_colors(dc_dist),
+    fillColor = ~district_colors(dc_dist),
+    fillOpacity = 0.7,
+    weight = 2,
+    group = ~paste("District", dc_dist)
+  ) %>%
+  addLayersControl(
+    overlayGroups = unique(paste("District", sort(homicides_sf$dc_dist))),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  addLegend(
+    position = "topright",
+    pal = district_colors,
+    values = ~dc_dist,
+    title = "Police District",
+    opacity = 1
+  )
+
+map_districts
+```
+
+**Question:** Which 3 police districts have the highest number of homicides?
+
+**ANSWER:** Based on the district summary table:
+1. District **`r district_summary$dc_dist[1]`**: **`r district_summary$homicides[1]`** homicides
+2. District **`r district_summary$dc_dist[2]`**: **`r district_summary$homicides[2]`** homicides
+3. District **`r district_summary$dc_dist[3]`**: **`r district_summary$homicides[3]`** homicides
+
+**NOTE:** These top districts account for `r round(sum(district_summary$homicides[1:3])/sum(district_summary$homicides)*100, 1)`% of all geocoded homicides. This concentration suggests resource allocation should be targeted to high-burden areas.
+
+---
+
+# Part 4: Temporal Analysis
+
+## Task 4.1: Homicides by Time of Day
+```{r time-analysis, fig.width=10, fig.height=6}
+# Count by time period
+time_summary <- homicides_sf %>%
+  st_drop_geometry() %>%
+  count(time_period) %>%
+  mutate(
+    percentage = n / sum(n) * 100
+  )
+
+kable(time_summary,
+      caption = "Homicides by Time of Day",
+      col.names = c("Time Period", "Count", "Percentage"),
+      digits = c(0, 0, 1))
+
+# Visualize
+ggplot(time_summary, aes(x = time_period, y = n, fill = time_period)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = paste0(n, "\n(", round(percentage, 1), "%)")), 
+            vjust = -0.5, size = 4) +
+  scale_fill_manual(values = c("#FFC107", "#FF9800", "#F44336", "#880E4F")) +
+  labs(
+    title = "Philadelphia Homicides by Time of Day (2025)",
+    subtitle = paste("Total geocoded homicides:", sum(time_summary$n)),
+    x = "Time Period",
+    y = "Number of Homicides"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1)) +
+  ylim(0, max(time_summary$n) * 1.15)
+```
+
+**Question:** During which time period do most homicides occur?
+
+**ANSWER:** Most homicides occur during **`r time_summary$time_period[which.max(time_summary$n)]`**, accounting for **`r round(time_summary$percentage[which.max(time_summary$n)], 1)`%** of all homicides (n = `r time_summary$n[which.max(time_summary$n)]`).
+
+**NOTE:** The concentration of homicides in late night/evening hours suggests:
+- Role of nighttime economy (bars, social gatherings)
+- Reduced guardianship (fewer witnesses, police)
+- Alcohol involvement likely
+- Different intervention strategies needed for different times
+
+---
+
+## Task 4.2: Homicides by Month
+```{r monthly-analysis, fig.width=10, fig.height=6}
+# Create month variable
+homicides_monthly <- homicides_sf %>%
+  st_drop_geometry() %>%
+  mutate(
+    month = month(dispatch_date, label = TRUE, abbr = TRUE)
+  ) %>%
+  count(month) %>%
+  mutate(
+    month_num = match(as.character(month), month.abb)
+  ) %>%
+  arrange(month_num)
+
+kable(homicides_monthly %>% select(month, n),
+      caption = "Homicides by Month",
+      col.names = c("Month", "Homicides"))
+
+# Line plot
+ggplot(homicides_monthly, aes(x = month, y = n, group = 1)) +
+  geom_line(color = "darkred", size = 1.2) +
+  geom_point(color = "darkred", size = 3) +
+  geom_text(aes(label = n), vjust = -1, size = 3.5) +
+  labs(
+    title = "Philadelphia Homicides by Month (2025)",
+    x = "Month",
+    y = "Number of Homicides"
+  ) +
+  theme_minimal(base_size = 13) +
+  ylim(0, max(homicides_monthly$n) * 1.15)
+```
+
+**Question:** Are there seasonal patterns in homicides? Which months have the highest and lowest counts?
+
+**ANSWER:**
+- **Highest:** `r homicides_monthly$month[which.max(homicides_monthly$n)]` with **`r max(homicides_monthly$n)`** homicides
+- **Lowest:** `r homicides_monthly$month[which.min(homicides_monthly$n)]` with **`r min(homicides_monthly$n)`** homicides
+
+
+
+---
+
+## Task 4.3: Homicides by Day of Week
+```{r dow-analysis, fig.width=10, fig.height=6}
+# Day of week analysis
+homicides_dow <- homicides_sf %>%
+  st_drop_geometry() %>%
+  mutate(
+    day_of_week = wday(dispatch_date, label = TRUE, abbr = FALSE)
+  ) %>%
+  count(day_of_week)
+
+kable(homicides_dow,
+      caption = "Homicides by Day of Week",
+      col.names = c("Day", "Homicides"))
+
+# Bar plot
+ggplot(homicides_dow, aes(x = day_of_week, y = n, fill = day_of_week)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = n), vjust = -0.5, size = 4) +
+  scale_fill_brewer(palette = "Set3") +
+  labs(
+    title = "Philadelphia Homicides by Day of Week (2025)",
+    x = "Day of Week",
+    y = "Number of Homicides"
+  ) +
+  theme_minimal(base_size = 13) +
+  ylim(0, max(homicides_dow$n) * 1.1)
+```
+
+**Question:** Are homicides more common on certain days of the week?
+
+**ANSWER:** 
+```{r dow-pattern}
+weekend_days <- c("Saturday", "Sunday")
+weekend_total <- homicides_dow %>% 
+  filter(day_of_week %in% weekend_days) %>% 
+  summarize(total = sum(n)) %>% 
+  pull(total)
+
+weekday_total <- sum(homicides_dow$n) - weekend_total
+weekend_avg <- weekend_total / 2
+weekday_avg <- weekday_total / 5
+
+if(weekend_avg > weekday_avg) {
+  cat("Yes, homicides are more common on weekends. Weekend days average", 
+      round(weekend_avg, 1), "homicides compared to", round(weekday_avg, 1), 
+      "on weekdays.\n")
+} else {
+  cat("Homicides show relatively even distribution across days of the week, with weekend average of",
+      round(weekend_avg, 1), "compared to weekday average of", round(weekday_avg, 1), ".\n")
+}
+```
+
+**NOTE:** Weekend elevation (if present) likely reflects:
+- More social gatherings/nightlife
+- Alcohol consumption patterns
+- Reduced routine activities (work/school structure)
+- Different police deployment patterns
+
+---
+
+# Part 5: Critical Reflection
+
+## Question: Geocoding Quality Assessment
+
+**Reflect on the geocoding process. What percentage of addresses could NOT be geocoded? How might these missing locations affect your spatial analysis?**
+
+**ANSWER:**
+```{r geocoding-summary}
+total_incidents <- nrow(homicides)
+successfully_geocoded <- nrow(homicides_sf)
+failed_to_geocode <- total_incidents - successfully_geocoded
+failure_rate <- (failed_to_geocode / total_incidents) * 100
+
+cat("Geocoding Summary:\n")
+cat("Total incidents:", total_incidents, "\n")
+cat("Successfully geocoded:", successfully_geocoded, "(", 
+    round(100 - failure_rate, 1), "%)\n")
+cat("Failed to geocode:", failed_to_geocode, "(", 
+    round(failure_rate, 1), "%)\n\n")
+```
+
+**Impact on spatial analysis:**
+
+1. **Reduced sample size**: We lost `r failed_to_geocode` cases (`r round(failure_rate, 1)`%), reducing statistical power to detect spatial patterns.
+
+2. **Potential spatial bias**: 
+   - If geocoding failures are randomly distributed → estimates remain unbiased but less precise
+   - If failures cluster spatially → systematic bias in hot spot detection
+   - Rural or newly developed areas often have lower geocoding rates
+
+3. **District-level effects**:
+   - Some districts may be underrepresented if geocoding failures concentrated there
+   - Rate calculations (homicides per capita) will be underestimated in affected areas
+
+4. **Cannot assess patterns in failed areas**: 
+   - Hot spots may exist in areas with many failures but go undetected
+   - Resource allocation decisions could be biased against these areas
+
+**NOTE:** This is why the Zimmerman et al. (2008) paper is so important - it showed that geocoding failures ARE spatially clustered, and when disease is associated with geocoding failure (e.g., rural disease + rural geocoding failure), statistical power drops by 50-70%!
+
+---
+
+## Question: Positional Uncertainty from Block-Level Addresses
+
+**The addresses in this dataset are recorded at the block level (e.g., "2800 BLOCK PROSPECT ST").  The Census geocoder places each address somewhere along the corresponding street segment, but the true incident location could be anywhere on that block — typically a 50–200 m range.  Discuss how this inherent positional uncertainty could affect each of the following analyses:**
+
+**a) Identifying homicide hot spots?**
+
+**ANSWER:** A 50–200 m positional uncertainty can:
+- Blur the true boundaries of spatial clusters
+- Move cases in or out of a detected cluster depending on where along the block they are placed
+- Reduce statistical power, making it harder to detect real clusters
+- Create spurious clusters if the geocoder systematically places block-level addresses at the same interpolation point
+- Be particularly problematic for small-area clusters (radius < 500 m)
+
+**b) Calculating distance to the nearest police station?**
+
+**ANSWER:**
+- The positional uncertainty translates directly into roughly the same magnitude of error in any distance calculation
+- An incident near the boundary of a 500 m buffer around a station could be misclassified as inside or outside that buffer
+- This affects accessibility analyses and response-time estimates
+- Areas with many block-level addresses near station boundaries are most vulnerable to this bias
+
+**c) Determining whether a homicide occurred within a specific neighbourhood?**
+
+**ANSWER:**
+- Census tracts are typically 1–4 blocks across; a 50–200 m shift can easily cross a tract boundary
+- Incidents near neighbourhood borders may be assigned to the wrong administrative unit
+- This biases rate calculations for the affected neighbourhoods
+- Small neighbourhoods and narrow boundary zones are at highest risk of misclassification
+
+**NOTE:** Connect this to the Olson et al. (2006) paper — they showed that aggregating to census tract centroids (which introduces comparable positional error) reduced cluster-detection power by 20–30%. Also relevant: Jacquez (2012) documents mean positional errors of 58–614 m across different geocoding settings.
+
+---
+
+## Question: Spatial Patterns
+
+**Based on your maps and analyses, describe the spatial distribution of homicides in Philadelphia. Are they concentrated in certain areas or evenly distributed?**
+
+**ANSWER:**
+
+Homicides in Philadelphia 2025 show **strong spatial concentration**:
+
+1. **Geographic concentration**: 
+   - Top 3 districts account for `r if(nrow(district_summary)>=3) round(sum(district_summary$homicides[1:3])/sum(district_summary$homicides)*100,1) else "~40"`% of all homicides
+   - Clear visual clustering in North and West Philadelphia
+   - Some areas have virtually no homicides
+
+2. **Spatial heterogeneity**:
+   - Not all areas within high-burden districts equally affected
+   - Micro-level clustering within districts visible on interactive maps
+   - Some street segments/blocks have multiple incidents
+
+3. **Possible explanations** (would require additional data to confirm):
+   - Correlation with socioeconomic disadvantage
+   - Historical patterns of segregation and disinvestment
+   - Population density variations
+   - Drug market locations
+   - Gang territory boundaries
+
+4. **Statistical confirmation needed**:
+   - Visual patterns should be tested with Moran\'s I or spatial scan statistics
+   - Need to account for population at risk (denominators)
+   - Consider other spatial risk factors
+
+**NOTE:** This provides teachable moment about:
+- Ecological fallacy (area-level patterns ≠ individual risk)
+- Need for appropriate denominators (incidents per capita, not just counts)
+- Importance of theory in interpreting spatial patterns
+- Ethics of mapping stigmatizing outcomes
+
+---
+
+## Question: Temporal Patterns
+
+**Describe any temporal patterns you observed (time of day, day of week, monthly trends). How might these patterns inform public safety strategies?**
+
+**ANSWER:**
+
+**Key temporal patterns:**
+
+1. **Time of day**: `r round(max(time_summary$percentage), 1)`% of homicides occur during `r time_summary$time_period[which.max(time_summary$percentage)]`
+   - Suggests role of nighttime economy, alcohol, reduced guardianship
+
+2. **Day of week**: 
+```{r dow-weekend-effect}
+if(exists("weekend_avg") && weekend_avg > weekday_avg) {
+  cat("   - Weekend elevation (", round(weekend_avg, 1), " vs ", 
+      round(weekday_avg, 1), " on weekdays)\n", sep="")
+  cat("   - Peak on ", homicides_dow$day_of_week[which.max(homicides_dow$n)], 
+      " (", max(homicides_dow$n), " homicides)\n", sep="")
+}
+```
+
+3. **Seasonal pattern**:
+```{r seasonal-effect}
+if(exists("summer_avg") && summer_avg > winter_avg) {
+  cat("   - Summer months show ", round(summer_avg/winter_avg, 1), 
+      "× more homicides than winter\n", sep="")
+}
+```
+
+**Implications for public safety strategies:**
+
+1. **Temporal resource allocation**:
+   - Concentrate patrols during high-risk hours (`r time_summary$time_period[which.max(time_summary$percentage)]`)
+   - Increase weekend staffing
+   - Seasonal surge capacity for summer months
+
+2. **Place-based interventions**:
+   - Target nightlife districts during peak hours
+   - Hot spot policing in specific locations at specific times
+   - "Pulling levers" strategies focused on high-risk times
+
+3. **Prevention programs**:
+   - Violence interruption programs active during high-risk hours
+   - Community events to provide alternative activities
+   - Cooling centers in summer (if heat-violence link confirmed)
+
+4. **Data-driven scheduling**:
+   - Shift schedules based on temporal patterns
+   - Predictive policing (with appropriate safeguards)
+   - Real-time resource deployment
+
+**NOTE:** Emphasize:
+- Temporal patterns provide actionable intelligence
+- But must be combined with spatial patterns (spatiotemporal analysis)
+- Ethical concerns about over-policing
+- Need for root cause approaches, not just enforcement
+
+---
+
+## Question: Data Quality and Ethics
+
+**This exercise used real homicide data. Discuss:**
+
+**a) What ethical considerations should researchers keep in mind when working with crime victim location data?**
+
+**ANSWER:**
+
+1. **Respect for victims and families**:
+   - Each data point represents a person and grieving family
+   - Avoid sensationalizing or exploiting tragedy
+   - Consider re-traumatization risk when publishing maps
+
+2. **Privacy protection**:
+   - Even with block-level addresses, small areas might enable identification
+   - Rare incidents (specific dates/locations) could be identifiable
+   - Need to balance transparency with privacy
+
+3. **Stigmatization of communities**:
+   - Maps can reinforce negative stereotypes
+   - Risk of furthering marginalization of already disadvantaged areas
+   - Must present with context about structural causes
+
+4. **Misuse potential**:
+   - Data could be used to discriminate (housing, insurance, lending)
+   - Could affect property values in mapped areas
+   - Potential for vigilante or retaliatory use
+
+5. **Research purpose**:
+   - Must have clear public health benefit
+   - Results should inform interventions that help affected communities
+   - Involve community members in research process
+
+**b) How does the block-level aggregation of addresses in this dataset provide some privacy protection?**
+
+**ANSWER:**
+
+Block-level aggregation provides privacy through **geographic imprecision**:
+
+1. **Location ambiguity**:
+   - "2800 BLOCK PROSPECT ST" could be any address from 2800-2899
+   - Typically 20-50 addresses per block
+   - Exact location cannot be determined
+
+2. **Reduced re-identification risk**:
+   - Harder to link to specific individuals or properties
+   - Multiple households in the affected area
+   - Time + block combination still fairly unique, but less than exact address
+
+3. **HIPAA considerations**:
+   - Block-level addresses considered less identifying than exact addresses
+   - Analogous to 3-digit ZIP code rule (but smaller area)
+
+4. **Limitations of this protection**:
+   - Some blocks have few/one address (dead ends, large properties)
+   - Date + block + victim characteristics could still enable identification
+   - News reports often provide exact locations anyway
+
+5. **Trade-off**:
+   - More privacy → less analytical precision
+   - But ~50-100m positional error probably acceptable for most analyses
+
+**c) What additional steps might be necessary before publicly releasing maps of this data?**
+
+**ANSWER:**
+
+Before public release:
+
+1. **Temporal aggregation**:
+   - Don\'t show exact dates, use months or quarters
+   - Prevents linking to news reports or obituaries
+   - Reduces re-identification risk
+
+2. **Spatial aggregation for sparse areas**:
+   - Aggregate to larger units (neighborhoods, tracts) in low-count areas
+   - Apply small cell suppression (n<11 rule)
+   - Use heat maps rather than point maps
+
+3. **Contextual information**:
+   - Include population denominators (rates, not counts)
+   - Provide socioeconomic context
+   - Explain structural factors (not victim-blaming)
+   - Add resources for affected communities
+
+4. **Community engagement**:
+   - Consult with affected communities before release
+   - Consider whether release helps or harms community
+   - Provide advance notice to community organizations
+
+5. **Access controls**:
+   - Consider restricted access rather than fully public
+   - Require registration for access
+   - Data use agreements for researchers
+   - Audit log of data access
+
+6. **Legal review**:
+   - Confirm compliance with IRB, HIPAA, state laws
+   - Consider liability for misuse
+   - Terms of use for data
+
+**NOTE:** This is a teachable moment about:
+- Tension between transparency and privacy
+- Different ethical frameworks (utilitarian, rights-based, virtue ethics)
+- Researcher responsibility extends beyond IRB approval
+- Community-based participatory research principles
+- The "double-edged sword" of crime mapping
+
+---
+
+# Part 6: Your Own Dataset
+
+Now that you have worked through the full workflow — loading, geocoding, assessing match rates, mapping, and reflecting on accuracy and ethics — repeat the exercise on a dataset **you find yourself**.
+
+## 6.1 Choose a Dataset
+
+Find a publicly available dataset that contains **address-level location information** that you can geocode.  Good sources include:
+
+- City open-data portals (e.g. Philadelphia OpenData, NYC Open Data, Chicago Data Portal)
+- FBI Uniform Crime Reporting (UCR) downloads
+- CDC / state health-department disease-surveillance files
+- EPA enforcement or facility-location records
+- Any other source that interests you and contains US addresses
+
+**Requirements:**
+- At least 50 geocodable addresses
+- Addresses should be in a single metropolitan area (keeps the maps readable)
+- The dataset should have at least one categorical or temporal variable you can use to colour or layer a map
+
+**Question:** Describe your dataset.  What is the source?  How many records does it contain?  What variables are available?  Why did you choose it?
+
+---
+
+## 6.2 Geocode with the Census Bureau
+
+Adapt the code from Part 2 to geocode your new dataset.
+
+```{r your-geocode, eval=FALSE}
+# --- TEMPLATE — adapt column names to your data ---
+your_data_geocoded <- your_data %>%
+  mutate(
+    full_address = paste(ADDRESS_COLUMN, "CITY, STATE")
+  ) %>%
+  geocode(
+    address = full_address,
+    method  = "census",
+    lat     = latitude,
+    long    = longitude,
+    verbose = TRUE
+  )
+```
+
+**Question:** What is your match rate?  How does it compare to the Philadelphia homicide dataset?  If it differs, offer at least two plausible explanations (think about address format, geographic coverage of TIGER files, etc.).
+
+---
+
+## 6.3 Examine Your Failed Geocodes
+
+```{r your-failures, eval=FALSE}
+# --- TEMPLATE ---
+your_failed <- your_data_geocoded %>%
+  filter(is.na(latitude))
+
+kable(head(your_failed, 10))
+```
+
+**Question:** What patterns do you see in the addresses that failed?  Are the failures random, or do they cluster by neighbourhood, address type, or some other feature?
+
+---
+
+## 6.4 Map Your Data
+
+Create at least **two** maps:
+
+1. A basic point map of all successfully geocoded records.
+2. An enhanced map that uses colour or layer toggling to show variation by a categorical or temporal variable in your dataset.
+
+```{r your-maps, eval=FALSE}
+# --- TEMPLATE: basic map ---
+library(sf)
+library(leaflet)
+
+your_sf <- your_data_geocoded %>%
+  filter(!is.na(latitude)) %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326)
+
+your_sf %>%
+  leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircleMarkers(radius = 5, color = "steelblue", fillOpacity = 0.7)
+```
+
+**Question:** Describe the spatial pattern you observe.  Are the records clustered, or spread evenly?  Which areas have the highest and lowest concentrations?
+
+---
+
+## 6.5 Reflection
+
+**Question:** Compare your experience geocoding and mapping this new dataset to the Philadelphia homicide exercise.  Address at least three of the following:
+
+- How did your match rate compare, and why?
+- Were the spatial patterns you observed surprising?  What might explain them?
+- What ethical considerations apply to your dataset?  (Think about privacy, stigmatisation, potential for misuse.)
+- If you were to publish a map of your data, what additional steps would you take before doing so?
+- What limitations does positional uncertainty introduce for the specific analyses one might do with your dataset?
+
+**NOTE:** Part 6 is intentionally open-ended.  The goal is transfer — students must adapt code, make judgment calls about address formatting, and think critically about a new context.  Encourage students to discuss their choices in class.  Good datasets for discussion include ones where match rates are unexpectedly low (rural addresses, non-US geocoding) or where the spatial pattern raises ethical questions.
+
+---
+
+# Summary and Deliverables
+
+## Key Learning Points
+
+Students should now understand:
+
+1. ✅ **Geocoding is imperfect**: Match rates of `r round(match_rate_census, 1)`% mean `r round(100-match_rate_census, 1)`% of cases lost
+
+2. ✅ **Positional uncertainty exists**: Block-level addresses introduce 50–200 m of inherent positional imprecision even when geocoding "succeeds"
+
+3. ✅ **Spatial patterns are clear**: Homicides strongly clustered in specific areas
+
+4. ✅ **Temporal patterns matter**: Time of day, day of week, and season all show variation
+
+5. ✅ **Ethics are paramount**: Real data about real victims requires responsible handling
+
+6. ✅ **Transfer works**: Adapting the workflow to a new dataset reveals how context-dependent geocoding and mapping decisions really are
+
+## Files Created
+
+This exercise generated:
+```{r list-files}
+output_files <- c(
+  "philadelphia_homicides_basic.html",
+  "philadelphia_homicides_timeofday.html",
+  "failed_geocodes_census.csv",
+  "my_geocoded_homicides.csv"
+)
+
+cat("Output files:\n")
+for(f in output_files) {
+  if(file.exists(f)) {
+    cat("  ✓", f, "\n")
+  } else {
+    cat("  ✗", f, "(not found)\n")
+  }
+}
+```
+
+## Save Final Geocoded Dataset
+```{r save-final}
+# Save final geocoded data for future use
+homicides_final <- homicides_census %>%
+  select(objectid, dc_key, dispatch_date, hour, location_block, dc_dist,
+         ucr_general, text_general_code, latitude, longitude)
+
+write_csv(homicides_final, "my_geocoded_homicides.csv")
+cat("\nFinal geocoded dataset saved to: my_geocoded_homicides.csv\n")
+cat("Records:", nrow(homicides_final), "\n")
+cat("With valid coordinates:", sum(!is.na(homicides_final$latitude)), "\n")
+```
+
+---
+
+# Further Analysis Ideas
+
+For students who finish early:
+
+## 1. Kernel Density Estimation
+```{r kde-demo, eval=FALSE}
+library(spatstat)
+
+# Convert to ppp object for spatstat
+homicides_ppp <- as.ppp(st_coordinates(homicides_sf), 
+                         W = as.owin(st_bbox(homicides_sf)))
+
+# Calculate kernel density
+density_map <- density(homicides_ppp, sigma = 0.01)
+
+# Plot
+plot(density_map, main = "Homicide Density Heat Map")
+```
+
+## 2. Spatial Autocorrelation Test
+```{r morans-demo, eval=FALSE}
+library(spdep)
+
+# Would need to aggregate to areas (census tracts) first
+# Then calculate Moran\'s I to test for clustering
+```
+
+## 3. Distance to Facilities
+```{r distance-demo, eval=FALSE}
+# If you had police station locations:
+# Calculate distance from each homicide to nearest station
+# Analyze if distance affects response time or case clearance
+```
+
+## 4. Temporal Animation
+```{r animation-demo, eval=FALSE}
+# Create animated map showing homicides accumulating over the year
+# Requires additional packages like gganimate or leaflet.extras
+```
+
+---
+
+# References
+
+Key papers relevant to this exercise:
+
+1. **Jacquez, G.M. (2012).** "A research agenda: does geocoding positional error matter in health GIS studies?" *Spatial and Spatio-temporal Epidemiology*, 3(1), 7-16.
+   - Mean positional errors: 58-614m depending on setting
+   - Nearest neighbor misidentification increases with error and density
+
+2. **Zimmerman, D.L. & Lahiri, S. (2008).** "On estimating the statistical power of disease cluster detection tests in case-control studies." *Statistics in Medicine*, 27(26), 5500-5520.
+   - Geocoding failures are spatially clustered (p < 0.001)
+   - Power loss of 50-70% when disease associated with geocoding failure
+
+3. **Olson, K.L. et al. (2006).** "Effect of geocoding on accuracy of cluster detection in disease surveillance." *Advances in Disease Surveillance*, 1(1), 1-11.
+   - Aggregating to census tract centroids reduces detection power 20-30%
+   - Boundary crossing effect most severe
+
+4. **Goldberg, D.W. (2008).** "A Geocoding Best Practices Guide.** University of Southern California GIS Research Laboratory.
+   - Comprehensive guide to geocoding methodology
+   - Best practices for accuracy assessment
+
+5. **Armstrong, M.P. et al. (1999).** "Geographically masking health data to preserve confidentiality." *Statistics in Medicine*, 18, 497-525.
+   - Methods for geographic privacy protection
+   - Trade-offs between privacy and analytical utility
+
+---
+
+# Session Information
+```{r session-info}
+sessionInfo()
+```
