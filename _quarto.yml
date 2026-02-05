@@ -1,0 +1,12 @@
+project:
+  type: website
+  output-dir: _site
+
+website:
+  title: "Spatial Epidemiology - Exercise 1"
+
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show

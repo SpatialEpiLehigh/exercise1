@@ -2,11 +2,11 @@
 title: "Exercise 1: Geocoding Exercise: Philadelphia Homicides 2025"
 author: "Eric Delmelle"
 date: "Spring 2026"
-output: 
-  html_document:
+format: 
+  html:
     toc: true
-    toc_depth: 3
-    code_folding: show
+    toc-depth: 3
+    code-fold: show
 ---
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = FALSE)
@@ -23,7 +23,8 @@ By the end of this exercise, you will be able to:
 3. Identify and analyse failed geocodes
 4. Create interactive maps to visualise spatial and temporal patterns
 5. Understand how geocoding quality affects downstream spatial analysis
-6. Apply the full geocoding-to-visualisation workflow independently on a new dataset of your choosing
+6. Apply geographic masking (geomasking) to protect privacy while preserving spatial patterns
+7. Apply the full geocoding-to-visualisation workflow independently on a new dataset of your choosing
 
 ## Background
 
@@ -40,6 +41,7 @@ library(leaflet)
 library(htmlwidgets)
 library(lubridate)
 library(knitr)
+library(tibble)
 
 # Set theme for plots
 theme_set(theme_minimal(base_size = 12))
@@ -116,48 +118,20 @@ kable(hourly_summary,
 
 # Part 2: Geocoding
 
-Before you geocode the homicide dataset, work through the short example below.
-It uses two well-known addresses so you can check the output against a map and
-get comfortable with how `geocode()` works.
-
-## Warm-Up: Geocoding Two Addresses
-
-### Single-line input
-
-The simplest way to call `geocode()` is to pass every address as one string
-(street + city + state).
-
-```{r example-single-line}
-library(tibble)
-library(tidygeocoder)
-
-# Two well-known addresses as single strings
-address_single <- tibble(
-  singlelineaddress = c(
-    "11 Wall St, New York, NY",
-    "600 Peachtree Street NE, Atlanta, GA"
-  )
-)
-
-# Geocode using the Census Bureau
-census_single <- address_single %>%
-  geocode(address = singlelineaddress, method = "census", verbose = TRUE)
-
-# Inspect the result
-census_single
-```
-
-
----
-
 ## Task 2.1: Geocode with Census Bureau
 ```{r geocode-census}
-# Geocode using Census Bureau
-# NOTE: Census geocoder is slow and rate-limited
 
 homicides_census <- homicides %>%
   mutate(
-    full_address = paste(location_block, "Philadelphia, PA")
+    clean_address = location_block %>%
+      str_replace(" BLOCK ", " ") %>%
+      str_remove_all('"') %>%                    # Remove quotes
+      str_replace(" AV$", " AVE") %>%            # Fix truncated AV
+      str_replace(" A$", " AVE") %>%             # Fix truncated A
+      str_replace(" ST$", " STREET") %>%         # Expand ST (optional)
+      str_replace("WAKELNG", "WAKELING") %>%     # Fix known misspelling
+      str_replace("MUHFIELD", "MUHLFIELD"),      # Fix known misspelling
+    full_address = paste(clean_address, "Philadelphia, PA")
   ) %>%
   geocode(
     address = full_address,
@@ -179,6 +153,7 @@ cat(
   "%\n"
 )
 ```
+
 
 **Question:** What columns were added by the geocoding process?
 
@@ -283,7 +258,7 @@ bbox <- st_bbox(homicides_sf)
 # Create plot
 plot(st_geometry(homicides_sf),
      pch = 19,
-     col = alpha("red", 0.6),
+     col = adjustcolor("red", alpha.f = 0.6),
      cex = 0.8,
      main = "Philadelphia Homicides 2025",
      xlab = "Longitude",
@@ -329,7 +304,7 @@ map_basic <- homicides_sf %>%
       "District: ", dc_dist, "<br>",
       "Object ID: ", objectid
     ),
-    radius = 6,
+    radius = 4,
     color = "darkred",
     fillColor = "red",
     fillOpacity = 0.7,
@@ -407,7 +382,7 @@ map_time <- homicides_sf %>%
       "Location: ", location_block, "<br>",
       "District: ", dc_dist
     ),
-    radius = 6,
+    radius = 4,
     color = ~time_colors(time_period),
     fillColor = ~time_colors(time_period),
     fillOpacity = 0.8,
@@ -479,7 +454,7 @@ map_districts <- homicides_sf %>%
       "Time: ", hour, ":00<br>",
       "Location: ", location_block
     ),
-    radius = 6,
+    radius = 4,
     color = ~district_colors(dc_dist),
     fillColor = ~district_colors(dc_dist),
     fillOpacity = 0.7,
@@ -556,107 +531,6 @@ ggplot(time_summary, aes(x = time_period, y = n, fill = time_period)) +
 - Alcohol involvement likely
 - Different intervention strategies needed for different times
 
----
-
-## Task 4.2: Homicides by Month
-```{r monthly-analysis, fig.width=10, fig.height=6}
-# Create month variable
-homicides_monthly <- homicides_sf %>%
-  st_drop_geometry() %>%
-  mutate(
-    month = month(dispatch_date, label = TRUE, abbr = TRUE)
-  ) %>%
-  count(month) %>%
-  mutate(
-    month_num = match(as.character(month), month.abb)
-  ) %>%
-  arrange(month_num)
-
-kable(homicides_monthly %>% select(month, n),
-      caption = "Homicides by Month",
-      col.names = c("Month", "Homicides"))
-
-# Line plot
-ggplot(homicides_monthly, aes(x = month, y = n, group = 1)) +
-  geom_line(color = "darkred", size = 1.2) +
-  geom_point(color = "darkred", size = 3) +
-  geom_text(aes(label = n), vjust = -1, size = 3.5) +
-  labs(
-    title = "Philadelphia Homicides by Month (2025)",
-    x = "Month",
-    y = "Number of Homicides"
-  ) +
-  theme_minimal(base_size = 13) +
-  ylim(0, max(homicides_monthly$n) * 1.15)
-```
-
-**Question:** Are there seasonal patterns in homicides? Which months have the highest and lowest counts?
-
-**ANSWER:**
-- **Highest:** `r homicides_monthly$month[which.max(homicides_monthly$n)]` with **`r max(homicides_monthly$n)`** homicides
-- **Lowest:** `r homicides_monthly$month[which.min(homicides_monthly$n)]` with **`r min(homicides_monthly$n)`** homicides
-
-
-
----
-
-## Task 4.3: Homicides by Day of Week
-```{r dow-analysis, fig.width=10, fig.height=6}
-# Day of week analysis
-homicides_dow <- homicides_sf %>%
-  st_drop_geometry() %>%
-  mutate(
-    day_of_week = wday(dispatch_date, label = TRUE, abbr = FALSE)
-  ) %>%
-  count(day_of_week)
-
-kable(homicides_dow,
-      caption = "Homicides by Day of Week",
-      col.names = c("Day", "Homicides"))
-
-# Bar plot
-ggplot(homicides_dow, aes(x = day_of_week, y = n, fill = day_of_week)) +
-  geom_col(show.legend = FALSE) +
-  geom_text(aes(label = n), vjust = -0.5, size = 4) +
-  scale_fill_brewer(palette = "Set3") +
-  labs(
-    title = "Philadelphia Homicides by Day of Week (2025)",
-    x = "Day of Week",
-    y = "Number of Homicides"
-  ) +
-  theme_minimal(base_size = 13) +
-  ylim(0, max(homicides_dow$n) * 1.1)
-```
-
-**Question:** Are homicides more common on certain days of the week?
-
-**ANSWER:** 
-```{r dow-pattern}
-weekend_days <- c("Saturday", "Sunday")
-weekend_total <- homicides_dow %>% 
-  filter(day_of_week %in% weekend_days) %>% 
-  summarize(total = sum(n)) %>% 
-  pull(total)
-
-weekday_total <- sum(homicides_dow$n) - weekend_total
-weekend_avg <- weekend_total / 2
-weekday_avg <- weekday_total / 5
-
-if(weekend_avg > weekday_avg) {
-  cat("Yes, homicides are more common on weekends. Weekend days average", 
-      round(weekend_avg, 1), "homicides compared to", round(weekday_avg, 1), 
-      "on weekdays.\n")
-} else {
-  cat("Homicides show relatively even distribution across days of the week, with weekend average of",
-      round(weekend_avg, 1), "compared to weekday average of", round(weekday_avg, 1), ".\n")
-}
-```
-
-**NOTE:** Weekend elevation (if present) likely reflects:
-- More social gatherings/nightlife
-- Alcohol consumption patterns
-- Reduced routine activities (work/school structure)
-- Different police deployment patterns
 
 ---
 
@@ -709,6 +583,7 @@ cat("Failed to geocode:", failed_to_geocode, "(",
 **a) Identifying homicide hot spots?**
 
 **ANSWER:** A 50–200 m positional uncertainty can:
+
 - Blur the true boundaries of spatial clusters
 - Move cases in or out of a detected cluster depending on where along the block they are placed
 - Reduce statistical power, making it harder to detect real clusters
@@ -718,6 +593,7 @@ cat("Failed to geocode:", failed_to_geocode, "(",
 **b) Calculating distance to the nearest police station?**
 
 **ANSWER:**
+
 - The positional uncertainty translates directly into roughly the same magnitude of error in any distance calculation
 - An incident near the boundary of a 500 m buffer around a station could be misclassified as inside or outside that buffer
 - This affects accessibility analyses and response-time estimates
@@ -726,6 +602,7 @@ cat("Failed to geocode:", failed_to_geocode, "(",
 **c) Determining whether a homicide occurred within a specific neighbourhood?**
 
 **ANSWER:**
+
 - Census tracts are typically 1–4 blocks across; a 50–200 m shift can easily cross a tract boundary
 - Incidents near neighbourhood borders may be assigned to the wrong administrative unit
 - This biases rate calculations for the affected neighbourhoods
@@ -744,16 +621,19 @@ cat("Failed to geocode:", failed_to_geocode, "(",
 Homicides in Philadelphia 2025 show **strong spatial concentration**:
 
 1. **Geographic concentration**: 
+
    - Top 3 districts account for `r if(nrow(district_summary)>=3) round(sum(district_summary$homicides[1:3])/sum(district_summary$homicides)*100,1) else "~40"`% of all homicides
    - Clear visual clustering in North and West Philadelphia
    - Some areas have virtually no homicides
 
 2. **Spatial heterogeneity**:
+
    - Not all areas within high-burden districts equally affected
    - Micro-level clustering within districts visible on interactive maps
    - Some street segments/blocks have multiple incidents
 
 3. **Possible explanations** (would require additional data to confirm):
+
    - Correlation with socioeconomic disadvantage
    - Historical patterns of segregation and disinvestment
    - Population density variations
@@ -761,11 +641,13 @@ Homicides in Philadelphia 2025 show **strong spatial concentration**:
    - Gang territory boundaries
 
 4. **Statistical confirmation needed**:
+
    - Visual patterns should be tested with Moran\'s I or spatial scan statistics
    - Need to account for population at risk (denominators)
    - Consider other spatial risk factors
 
 **NOTE:** This provides teachable moment about:
+
 - Ecological fallacy (area-level patterns ≠ individual risk)
 - Need for appropriate denominators (incidents per capita, not just counts)
 - Importance of theory in interpreting spatial patterns
@@ -805,147 +687,377 @@ if(exists("summer_avg") && summer_avg > winter_avg) {
 **Implications for public safety strategies:**
 
 1. **Temporal resource allocation**:
+
    - Concentrate patrols during high-risk hours (`r time_summary$time_period[which.max(time_summary$percentage)]`)
    - Increase weekend staffing
    - Seasonal surge capacity for summer months
 
 2. **Place-based interventions**:
+
    - Target nightlife districts during peak hours
    - Hot spot policing in specific locations at specific times
    - "Pulling levers" strategies focused on high-risk times
 
 3. **Prevention programs**:
+
    - Violence interruption programs active during high-risk hours
    - Community events to provide alternative activities
    - Cooling centers in summer (if heat-violence link confirmed)
 
 4. **Data-driven scheduling**:
+
    - Shift schedules based on temporal patterns
    - Predictive policing (with appropriate safeguards)
    - Real-time resource deployment
 
 **NOTE:** Emphasize:
+
 - Temporal patterns provide actionable intelligence
 - But must be combined with spatial patterns (spatiotemporal analysis)
 - Ethical concerns about over-policing
 - Need for root cause approaches, not just enforcement
 
+
+
+# Part 6: Geographic Masking for Privacy Protection
+
+## Introduction to Geomasking
+
+We have discussed the ethical considerations of working with sensitive location data. Even though our Philadelphia homicide dataset uses block-level addresses rather than exact locations, the combination of date, time, and approximate location could potentially allow re-identification of victims through news reports or public records.
+
+**Geographic masking** (or geomasking) is a family of techniques that deliberately introduce positional error to protect privacy while preserving spatial patterns for analysis. The fundamental trade-off is:
+
+- **More displacement** → Better privacy protection → Less analytical precision
+- **Less displacement** → Weaker privacy protection → Better analytical precision
+
+The most straightforward approach is **random perturbation**, where each point is displaced by a random distance in a random direction.
+
+## The Random Perturbation Method
+
+Random perturbation works by:
+
+1. Generating a random angle θ between 0° and 360°
+2. Generating a random distance *d* between 0 and a maximum threshold (e.g., 100 meters)
+3. Displacing each point by distance *d* in direction θ
+
+This creates a "cloud of uncertainty" around each true location. An attacker who obtains the masked coordinates cannot know if the true location is north, south, east, or west of the displayed point—only that it lies somewhere within the masking radius.
+
+## Task 6.1: Apply Random Perturbation to Philadelphia Homicides
+
+We will mask the homicide locations using a **500-meter threshold**. This value is chosen because:
+
+- It exceeds the ~50m positional uncertainty already present from block-level geocoding
+- It provides meaningful privacy protection (roughly one city block)
+- It preserves neighborhood-level spatial patterns
+- It is consistent with common geomasking practice in public health research
+
+```{r geomasking-function}
+# Function to apply random perturbation geomasking
+# Inputs:
+#   sf_object: an sf object with point geometries
+#   max_distance_m: maximum displacement distance in meters
+# Returns:
+#   sf object with perturbed coordinates
+
+geomask_random_perturbation <- function(sf_object, max_distance_m) {
+  
+  # Ensure we have point geometries
+  if (!all(st_geometry_type(sf_object) == "POINT")) {
+    stop("Input must contain only POINT geometries")
+  }
+  
+  n_points <- nrow(sf_object)
+  
+  # Generate random angles (0 to 2*pi radians)
+  random_angles <- runif(n_points, 0, 2 * pi)
+  
+  # Generate random distances (0 to max_distance_m)
+  random_distances <- runif(n_points, 0, max_distance_m)
+  
+  # Calculate displacement in x and y (in meters)
+  dx_m <- random_distances * cos(random_angles)
+  dy_m <- random_distances * sin(random_angles)
+  
+  # Get current coordinates
+  coords <- st_coordinates(sf_object)
+  
+  # Convert meter displacement to degrees (approximate)
+  # At Philadelphia's latitude (~40°N):
+  # 1 degree latitude ≈ 111,000 m
+  # 1 degree longitude ≈ 85,000 m (111,000 * cos(40°))
+  lat_center <- mean(coords[, 2])
+  meters_per_deg_lat <- 111000
+  meters_per_deg_lon <- 111000 * cos(lat_center * pi / 180)
+  
+ dx_deg <- dx_m / meters_per_deg_lon
+  dy_deg <- dy_m / meters_per_deg_lat
+  
+  # Apply displacement
+  new_coords <- coords
+  new_coords[, 1] <- coords[, 1] + dx_deg
+  new_coords[, 2] <- coords[, 2] + dy_deg
+  
+  # Create new sf object with masked coordinates
+  masked_sf <- sf_object
+  st_geometry(masked_sf) <- st_sfc(
+    lapply(1:n_points, function(i) st_point(new_coords[i, ])),
+    crs = st_crs(sf_object)
+  )
+  
+  # Store the displacement distances for analysis
+  masked_sf$mask_distance_m <- random_distances
+  masked_sf$mask_angle_deg <- random_angles * 180 / pi
+  
+  return(masked_sf)
+}
+```
+
+```{r apply-geomasking}
+# Set seed for reproducibility (remove in production for true randomness)
+set.seed(42)
+
+# Apply 100-meter random perturbation
+homicides_masked <- geomask_random_perturbation(homicides_sf, max_distance_m = 500)
+
+# Summary of displacement distances
+cat("=== GEOMASKING SUMMARY ===\n")
+cat("Masking threshold: 100 meters\n")
+cat("Points masked:", nrow(homicides_masked), "\n")
+cat("\nDisplacement distances (meters):\n")
+cat("  Min:", round(min(homicides_masked$mask_distance_m), 1), "\n")
+cat("  Mean:", round(mean(homicides_masked$mask_distance_m), 1), "\n")
+cat("  Max:", round(max(homicides_masked$mask_distance_m), 1), "\n")
+```
+
+```{r displacement-histogram, fig.width=8, fig.height=5}
+# Visualize the distribution of displacement distances
+ggplot(homicides_masked, aes(x = mask_distance_m)) +
+  geom_histogram(bins = 20, fill = "steelblue", color = "white", alpha = 0.7) +
+  geom_vline(xintercept = mean(homicides_masked$mask_distance_m), 
+             color = "red", linetype = "dashed", size = 1) +
+  annotate("text", x = mean(homicides_masked$mask_distance_m) + 5, y = Inf, 
+           label = paste("Mean =", round(mean(homicides_masked$mask_distance_m), 1), "m"),
+           vjust = 2, hjust = 0, color = "red") +
+  labs(
+    title = "Distribution of Random Perturbation Distances",
+    subtitle = "100-meter maximum threshold",
+    x = "Displacement Distance (meters)",
+    y = "Count"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+**Question:** Why is the mean displacement approximately 67 meters rather than 50 meters (half of 100)?
+
+**ANSWER:** This is because we are sampling uniformly across a circular area, not along a line. Points near the edge of the circle have more "area" to sample from than points near the center. The expected mean distance for uniform random sampling within a circle of radius *r* is (2/3)*r* ≈ 0.67*r*. With *r* = 100m, the expected mean is ~67m.
+
+## Task 6.2: Compare Original and Masked Locations
+
+
+```{r compare-maps, fig.width=12, fig.height=6}
+# Create side-by-side comparison map
+
+# Get coordinates for both datasets
+original_coords <- st_coordinates(homicides_sf)
+masked_coords <- st_coordinates(homicides_masked)
+
+# Create comparison data frame
+comparison_df <- data.frame(
+  orig_lon = original_coords[, 1],
+  orig_lat = original_coords[, 2],
+  mask_lon = masked_coords[, 1],
+  mask_lat = masked_coords[, 2],
+  displacement = homicides_masked$mask_distance_m
+)
+
+# Create line geometries connecting original to masked locations
+displacement_lines <- lapply(1:nrow(comparison_df), function(i) {
+  st_linestring(matrix(
+    c(comparison_df$orig_lon[i], comparison_df$orig_lat[i],
+      comparison_df$mask_lon[i], comparison_df$mask_lat[i]),
+    ncol = 2, byrow = TRUE
+  ))
+})
+
+displacement_sf <- st_sf(
+  displacement_m = comparison_df$displacement,
+  geometry = st_sfc(displacement_lines, crs = 4326)
+)
+
+# Interactive comparison map with both layers
+map_comparison <- leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  
+  # Displacement lines (gray, dashed)
+  addPolylines(
+    data = displacement_sf,
+    color = "orange",
+    weight = 2,
+    opacity = 0.5,
+    dashArray = "3,3",
+    group = "Displacement Lines",
+    popup = ~paste0("Displacement: ", round(displacement_m, 1), " m")
+  ) %>%
+  
+  # Original locations (red)
+  addCircleMarkers(
+    data = homicides_sf,
+    radius = 5,
+    color = "red",
+    fillColor = "red",
+    fillOpacity = 0.6,
+    weight = 1,
+    group = "Original Locations",
+    popup = ~paste0(
+      "<strong>Original Location</strong><br>",
+      "Date: ", dispatch_date, "<br>",
+      "Block: ", location_block
+    )
+  ) %>%
+  
+  # Masked locations (blue)
+  addCircleMarkers(
+    data = homicides_masked,
+    radius = 5,
+    color = "blue",
+    fillColor = "blue",
+    fillOpacity = 0.6,
+    weight = 1,
+    group = "Masked Locations (100m)",
+    popup = ~paste0(
+      "<strong>Masked Location</strong><br>",
+      "Displacement: ", round(mask_distance_m, 1), " m<br>",
+      "Direction: ", round(mask_angle_deg, 0), "°"
+    )
+  ) %>%
+  
+  # Layer control
+  addLayersControl(
+    overlayGroups = c("Original Locations", "Masked Locations (100m)", "Displacement Lines"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  
+  addLegend(
+    position = "topright",
+    colors = c("red", "blue", "gray"),
+    labels = c("Original", "Masked (100m)", "Displacement"),
+    title = "Location Type"
+  ) %>%
+  
+  addScaleBar(position = "bottomleft")
+
+map_comparison
+
+# Save the comparison map
+saveWidget(map_comparison, "philadelphia_homicides_masked_comparison.html", selfcontained = TRUE)
+cat("\nComparison map saved to: philadelphia_homicides_masked_comparison.html\n")
+```
+```
+
+**Question:** Toggle the layers on and off to compare the original and masked locations. At the city-wide scale, can you visually distinguish between them? What about when you zoom in to a single neighborhood?
+
+**ANSWER:** At the city-wide scale, the overall spatial pattern (clustering in North and West Philadelphia) is preserved—the masked and original point clouds appear nearly identical. However, when you zoom in to a single neighborhood or block, individual points have clearly shifted. Some points that were on one side of a street now appear on the other side. This demonstrates the key principle of geomasking: **macro-level patterns are preserved while micro-level precision is sacrificed for privacy**.
+
+## Task 6.3: Assess Impact on Spatial Analysis
+
+Let's quantify how geomasking affects a common spatial analysis: counting incidents within police districts.
+
+```{r district-comparison}
+# Load Philadelphia police district boundaries (if available)
+# For this exercise, we'll use the district codes already in the data
+# and show how point-in-polygon assignments might change
+
+# Count by district - original
+district_original <- homicides_sf %>%
+  st_drop_geometry() %>%
+  count(dc_dist, name = "original_count")
+
+# Count by district - masked (using original district assignments)
+# Note: In practice, you would re-run point-in-polygon with masked coordinates
+district_masked <- homicides_masked %>%
+  st_drop_geometry() %>%
+  count(dc_dist, name = "masked_count")
+
+# Compare
+district_compare <- district_original %>%
+  left_join(district_masked, by = "dc_dist") %>%
+  mutate(
+    difference = masked_count - original_count,
+    pct_change = round((difference / original_count) * 100, 1)
+  )
+
+kable(district_compare,
+      caption = "District Counts: Original vs. Masked Locations",
+      col.names = c("District", "Original", "Masked", "Difference", "% Change"))
+```
+
+**NOTE:** In this comparison, we used the original district assignments for both datasets. In a real scenario where you only have masked coordinates, you would need to perform point-in-polygon analysis with the masked points, which could result in some boundary-crossing misclassifications. With a 100m masking threshold, points within ~100m of a district boundary could be assigned to the wrong district.
+
+## Task 6.4: Save Masked Dataset
+
+```{r save-masked}
+# Create a version suitable for public release
+homicides_public <- homicides_masked %>%
+  select(
+    objectid,
+    # Remove exact date - keep only month for temporal analysis
+    month = dispatch_date,
+    time_period,
+    dc_dist,
+    # Geometry is already masked
+  ) %>%
+  mutate(
+    month = floor_date(month, "month")  # Round to first of month
+  )
+
+# Remove the masking metadata (don't reveal displacement distances!)
+homicides_public$mask_distance_m <- NULL
+homicides_public$mask_angle_deg <- NULL
+
+# Save as GeoJSON for sharing
+st_write(homicides_public, "philadelphia_homicides_masked_public.geojson", 
+         delete_dsn = TRUE, quiet = TRUE)
+
+cat("Public release dataset saved to: philadelphia_homicides_masked_public.geojson\n")
+cat("Records:", nrow(homicides_public), "\n")
+cat("Variables retained: objectid, month, time_period, dc_dist, geometry\n")
+cat("\nPrivacy protections applied:\n")
+cat("  ✓ 100m random spatial perturbation\n")
+cat("  ✓ Dates aggregated to month\n")
+cat("  ✓ Exact addresses removed\n")
+```
+
+## Reflection: Choosing a Masking Threshold
+
+**Question:** We used 500 meters as our masking threshold. Discuss the trade-offs involved in choosing this value. Under what circumstances might you choose a larger threshold (e.g., 1000m)? A smaller one (e.g., 25m)?
+
+**ANSWER:**
+
+**Arguments for a larger threshold (e.g., 1000m):**
+- Highly sensitive data (e.g., HIV cases, domestic violence)
+- Rural areas where 500m might still identify a single property
+- When only regional patterns matter, not neighborhood-level
+- When re-identification risk is high (small population, rare event)
+- When data will be publicly released without access controls
+
+**Arguments for a smaller threshold (e.g., 25m):**
+- When spatial precision is critical for the analysis (e.g., environmental exposure assessment)
+- When data will remain within a secure research environment
+- Urban areas with high population density (many potential "matches" within small radius)
+- When other privacy protections are already in place (temporal aggregation, attribute suppression)
+- When the original data already has substantial positional error (block-level geocoding)
+
+**Key principle:** The masking threshold should be proportional to the privacy risk and inversely proportional to the analytical precision required. There is no universal "correct" value—it depends on context.
+
+**NOTE:** Connect this to the Armstrong et al. (1999) paper in the references, which provides a comprehensive framework for evaluating geomasking methods and their trade-offs.
+
 ---
 
-## Question: Data Quality and Ethics
+# Part 7: Your Own Dataset
 
-**This exercise used real homicide data. Discuss:**
+Now that you have worked through the full workflow — loading, geocoding, assessing match rates, mapping, reflecting on accuracy and ethics, and applying geomasking — repeat the exercise on a dataset **you find yourself**.
 
-**a) What ethical considerations should researchers keep in mind when working with crime victim location data?**
-
-**ANSWER:**
-
-1. **Respect for victims and families**:
-   - Each data point represents a person and grieving family
-   - Avoid sensationalizing or exploiting tragedy
-   - Consider re-traumatization risk when publishing maps
-
-2. **Privacy protection**:
-   - Even with block-level addresses, small areas might enable identification
-   - Rare incidents (specific dates/locations) could be identifiable
-   - Need to balance transparency with privacy
-
-3. **Stigmatization of communities**:
-   - Maps can reinforce negative stereotypes
-   - Risk of furthering marginalization of already disadvantaged areas
-   - Must present with context about structural causes
-
-4. **Misuse potential**:
-   - Data could be used to discriminate (housing, insurance, lending)
-   - Could affect property values in mapped areas
-   - Potential for vigilante or retaliatory use
-
-5. **Research purpose**:
-   - Must have clear public health benefit
-   - Results should inform interventions that help affected communities
-   - Involve community members in research process
-
-**b) How does the block-level aggregation of addresses in this dataset provide some privacy protection?**
-
-**ANSWER:**
-
-Block-level aggregation provides privacy through **geographic imprecision**:
-
-1. **Location ambiguity**:
-   - "2800 BLOCK PROSPECT ST" could be any address from 2800-2899
-   - Typically 20-50 addresses per block
-   - Exact location cannot be determined
-
-2. **Reduced re-identification risk**:
-   - Harder to link to specific individuals or properties
-   - Multiple households in the affected area
-   - Time + block combination still fairly unique, but less than exact address
-
-3. **HIPAA considerations**:
-   - Block-level addresses considered less identifying than exact addresses
-   - Analogous to 3-digit ZIP code rule (but smaller area)
-
-4. **Limitations of this protection**:
-   - Some blocks have few/one address (dead ends, large properties)
-   - Date + block + victim characteristics could still enable identification
-   - News reports often provide exact locations anyway
-
-5. **Trade-off**:
-   - More privacy → less analytical precision
-   - But ~50-100m positional error probably acceptable for most analyses
-
-**c) What additional steps might be necessary before publicly releasing maps of this data?**
-
-**ANSWER:**
-
-Before public release:
-
-1. **Temporal aggregation**:
-   - Don\'t show exact dates, use months or quarters
-   - Prevents linking to news reports or obituaries
-   - Reduces re-identification risk
-
-2. **Spatial aggregation for sparse areas**:
-   - Aggregate to larger units (neighborhoods, tracts) in low-count areas
-   - Apply small cell suppression (n<11 rule)
-   - Use heat maps rather than point maps
-
-3. **Contextual information**:
-   - Include population denominators (rates, not counts)
-   - Provide socioeconomic context
-   - Explain structural factors (not victim-blaming)
-   - Add resources for affected communities
-
-4. **Community engagement**:
-   - Consult with affected communities before release
-   - Consider whether release helps or harms community
-   - Provide advance notice to community organizations
-
-5. **Access controls**:
-   - Consider restricted access rather than fully public
-   - Require registration for access
-   - Data use agreements for researchers
-   - Audit log of data access
-
-6. **Legal review**:
-   - Confirm compliance with IRB, HIPAA, state laws
-   - Consider liability for misuse
-   - Terms of use for data
-
-**NOTE:** This is a teachable moment about:
-- Tension between transparency and privacy
-- Different ethical frameworks (utilitarian, rights-based, virtue ethics)
-- Researcher responsibility extends beyond IRB approval
-- Community-based participatory research principles
-- The "double-edged sword" of crime mapping
-
----
-
-# Part 6: Your Own Dataset
-
-Now that you have worked through the full workflow — loading, geocoding, assessing match rates, mapping, and reflecting on accuracy and ethics — repeat the exercise on a dataset **you find yourself**.
-
-## 6.1 Choose a Dataset
+## 7.1 Choose a Dataset
 
 Find a publicly available dataset that contains **address-level location information** that you can geocode.  Good sources include:
 
@@ -964,7 +1076,7 @@ Find a publicly available dataset that contains **address-level location informa
 
 ---
 
-## 6.2 Geocode with the Census Bureau
+## 7.2 Geocode with the Census Bureau
 
 Adapt the code from Part 2 to geocode your new dataset.
 
@@ -987,7 +1099,7 @@ your_data_geocoded <- your_data %>%
 
 ---
 
-## 6.3 Examine Your Failed Geocodes
+## 7.3 Examine Your Failed Geocodes
 
 ```{r your-failures, eval=FALSE}
 # --- TEMPLATE ---
@@ -1001,7 +1113,7 @@ kable(head(your_failed, 10))
 
 ---
 
-## 6.4 Map Your Data
+## 7.4 Map Your Data
 
 Create at least **two** maps:
 
@@ -1027,7 +1139,7 @@ your_sf %>%
 
 ---
 
-## 6.5 Reflection
+## 7.5 Reflection
 
 **Question:** Compare your experience geocoding and mapping this new dataset to the Philadelphia homicide exercise.  Address at least three of the following:
 
@@ -1037,105 +1149,124 @@ your_sf %>%
 - If you were to publish a map of your data, what additional steps would you take before doing so?
 - What limitations does positional uncertainty introduce for the specific analyses one might do with your dataset?
 
-**NOTE:** Part 6 is intentionally open-ended.  The goal is transfer — students must adapt code, make judgment calls about address formatting, and think critically about a new context.  Encourage students to discuss their choices in class.  Good datasets for discussion include ones where match rates are unexpectedly low (rural addresses, non-US geocoding) or where the spatial pattern raises ethical questions.
+
+---
+
+## 7.6 Apply Geographic Masking to Your Data
+
+Now apply random perturbation geomasking to your geocoded dataset. Unlike the Philadelphia exercise where we specified a 500-meter threshold, **you must determine an appropriate threshold for your specific data**.
+
+### Step 1: Choose Your Masking Threshold
+
+Before writing any code, consider these factors:
+
+1. **Sensitivity of the data**: How harmful would re-identification be?
+   - Medical data, crime victimization, domestic violence → larger threshold
+   - Restaurant inspections, business locations → smaller threshold (or none)
+
+2. **Geographic context**: What does distance mean in your study area?
+   - Rural area with dispersed properties → larger threshold (100m might identify a single farm)
+   - Dense urban area → smaller threshold may suffice (many potential "matches" nearby)
+
+3. **Analytical requirements**: What spatial precision do you need?
+   - Neighborhood-level analysis → can tolerate 200-500m masking
+   - Street-level or parcel-level analysis → masking may compromise results
+
+4. **Existing positional uncertainty**: How accurate was your geocoding?
+   - If geocoding already introduced ~100m error, adding 25m masking adds little privacy
+   - Consider masking threshold relative to existing uncertainty
+
+5. **Other privacy protections**: What else have you done?
+   - If dates are aggregated and attributes removed, spatial masking can be smaller
+   - If full attributes retained, spatial masking should be larger
+
+**Question:** What masking threshold will you use for your dataset? Justify your choice by addressing at least three of the factors above.
+
+**YOUR ANSWER:** [Write your threshold choice and justification here]
+
+---
+
+### Step 2: Apply Geomasking
+
+Use the `geomask_random_perturbation()` function from Part 6.5 to mask your data.
+
+```{r your-geomasking, eval=FALSE}
+# --- TEMPLATE: Apply geomasking to your data ---
+
+# First, ensure your data is an sf object
+your_sf <- your_data_geocoded %>%
+  filter(!is.na(latitude)) %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326)
+
+# Set your chosen threshold (in meters)
+my_threshold <- ___  # <-- Enter your threshold here
+
+# Apply random perturbation
+your_masked <- geomask_random_perturbation(your_sf, max_distance_m = my_threshold)
+
+# Summary
+cat("Masking threshold:", my_threshold, "meters\n")
+cat("Points masked:", nrow(your_masked), "\n")
+cat("Mean displacement:", round(mean(your_masked$mask_distance_m), 1), "m\n")
+```
+
+---
+
+### Step 3: Compare Original and Masked Locations
+
+Create a map comparing your original and masked locations, similar to Task 6.2.
+
+```{r your-mask-comparison, eval=FALSE}
+# --- TEMPLATE: Comparison map ---
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircleMarkers(
+    data = your_sf,
+    radius = 5, color = "red", fillOpacity = 0.6,
+    group = "Original"
+  ) %>%
+  addCircleMarkers(
+    data = your_masked,
+    radius = 5, color = "blue", fillOpacity = 0.6,
+    group = paste0("Masked (", my_threshold, "m)")
+  ) %>%
+  addLayersControl(
+    overlayGroups = c("Original", paste0("Masked (", my_threshold, "m)")),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+```
+
+**Question:** At what zoom level do the original and masked points become visually distinguishable? Is this consistent with your chosen threshold?
+
+---
+
+### Step 4: Assess Impact on Your Analysis
+
+Choose one spatial analysis relevant to your dataset (e.g., counts by administrative unit, distance to facilities, cluster detection) and assess how geomasking affects the results.
+
+**Question:** Describe the analysis you performed and how geomasking changed the results. Was the impact acceptable given your analytical goals? If the impact was too large, would you consider reducing the threshold, or would you accept reduced precision to maintain privacy protection?
+
+---
+
+### Step 5: Reflection on the Privacy-Utility Trade-off
+
+**Question:** Reflect on the overall geomasking process for your dataset. Address the following:
+
+a) Did your chosen threshold provide adequate privacy protection for the sensitivity of your data? How do you know?
+
+b) Did geomasking preserve the spatial patterns needed for your analytical purposes? What patterns were preserved, and what precision was lost?
+
+c) If you were preparing this dataset for public release, would you use the same threshold? Why or why not?
+
+d) What additional privacy protections (temporal aggregation, attribute suppression, access controls) might you combine with geomasking?
+
+**NOTE:** There is no single "correct" threshold—the goal is to demonstrate thoughtful consideration of the privacy-utility trade-off in your specific context. Students who choose different thresholds for different types of data are demonstrating appropriate critical thinking.
 
 ---
 
 # Summary and Deliverables
 
-## Key Learning Points
 
-Students should now understand:
-
-1. ✅ **Geocoding is imperfect**: Match rates of `r round(match_rate_census, 1)`% mean `r round(100-match_rate_census, 1)`% of cases lost
-
-2. ✅ **Positional uncertainty exists**: Block-level addresses introduce 50–200 m of inherent positional imprecision even when geocoding "succeeds"
-
-3. ✅ **Spatial patterns are clear**: Homicides strongly clustered in specific areas
-
-4. ✅ **Temporal patterns matter**: Time of day, day of week, and season all show variation
-
-5. ✅ **Ethics are paramount**: Real data about real victims requires responsible handling
-
-6. ✅ **Transfer works**: Adapting the workflow to a new dataset reveals how context-dependent geocoding and mapping decisions really are
-
-## Files Created
-
-This exercise generated:
-```{r list-files}
-output_files <- c(
-  "philadelphia_homicides_basic.html",
-  "philadelphia_homicides_timeofday.html",
-  "failed_geocodes_census.csv",
-  "my_geocoded_homicides.csv"
-)
-
-cat("Output files:\n")
-for(f in output_files) {
-  if(file.exists(f)) {
-    cat("  ✓", f, "\n")
-  } else {
-    cat("  ✗", f, "(not found)\n")
-  }
-}
-```
-
-## Save Final Geocoded Dataset
-```{r save-final}
-# Save final geocoded data for future use
-homicides_final <- homicides_census %>%
-  select(objectid, dc_key, dispatch_date, hour, location_block, dc_dist,
-         ucr_general, text_general_code, latitude, longitude)
-
-write_csv(homicides_final, "my_geocoded_homicides.csv")
-cat("\nFinal geocoded dataset saved to: my_geocoded_homicides.csv\n")
-cat("Records:", nrow(homicides_final), "\n")
-cat("With valid coordinates:", sum(!is.na(homicides_final$latitude)), "\n")
-```
-
----
-
-# Further Analysis Ideas
-
-For students who finish early:
-
-## 1. Kernel Density Estimation
-```{r kde-demo, eval=FALSE}
-library(spatstat)
-
-# Convert to ppp object for spatstat
-homicides_ppp <- as.ppp(st_coordinates(homicides_sf), 
-                         W = as.owin(st_bbox(homicides_sf)))
-
-# Calculate kernel density
-density_map <- density(homicides_ppp, sigma = 0.01)
-
-# Plot
-plot(density_map, main = "Homicide Density Heat Map")
-```
-
-## 2. Spatial Autocorrelation Test
-```{r morans-demo, eval=FALSE}
-library(spdep)
-
-# Would need to aggregate to areas (census tracts) first
-# Then calculate Moran\'s I to test for clustering
-```
-
-## 3. Distance to Facilities
-```{r distance-demo, eval=FALSE}
-# If you had police station locations:
-# Calculate distance from each homicide to nearest station
-# Analyze if distance affects response time or case clearance
-```
-
-## 4. Temporal Animation
-```{r animation-demo, eval=FALSE}
-# Create animated map showing homicides accumulating over the year
-# Requires additional packages like gganimate or leaflet.extras
-```
-
----
 
 # References
 
